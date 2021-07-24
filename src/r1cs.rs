@@ -42,7 +42,7 @@ impl R1CSGens {
     // generators to commit to the error/slack vector `E`
     let gens_E = CommitGens::new(b"gens_E", num_cons);
 
-    R1CSGens { gens_E, gens_W }
+    R1CSGens { gens_W, gens_E,  }
   }
 }
 
@@ -160,7 +160,7 @@ impl R1CSShape {
       res == 0
     };
 
-    assert!(res_eq, true);
+    assert!(res_eq);
 
     // verify if comm_E and comm_W are commitments to E and W
     let res_comm: bool = {
@@ -170,7 +170,7 @@ impl R1CSShape {
       U.comm_W == comm_W && U.comm_E == comm_E
     };
 
-    assert!(res_comm, true);
+    assert!(res_comm);
 
     if res_eq && res_comm {
       Ok(())

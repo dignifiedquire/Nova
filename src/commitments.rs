@@ -1,14 +1,22 @@
-use super::errors::NovaError;
 use core::ops::{Add, AddAssign, Mul, MulAssign};
-use curve25519_dalek::traits::VartimeMultiscalarMul;
-use digest::{ExtendableOutput, Input};
-use merlin::Transcript;
-use sha3::Shake256;
 use std::io::Read;
 
-pub type Scalar = curve25519_dalek::scalar::Scalar;
-type GroupElement = curve25519_dalek::ristretto::RistrettoPoint;
-type CompressedGroup = curve25519_dalek::ristretto::CompressedRistretto;
+use group::GroupEncoding;
+use merlin::Transcript;
+use pasta_curves::{
+  arithmetic::{FieldExt, Group},
+  pallas,
+};
+use sha3::{
+  digest::{ExtendableOutput, Update},
+  Shake256,
+};
+
+use crate::errors::NovaError;
+
+pub type Scalar = pallas::Scalar;
+type GroupElement = pallas::Point;
+type CompressedGroup = <pallas::Point as GroupEncoding>::Repr;
 
 #[derive(Debug)]
 pub struct CommitGens {
@@ -28,13 +36,18 @@ pub struct CompressedCommitment {
 impl CommitGens {
   pub fn new(label: &[u8], n: usize) -> Self {
     let mut shake = Shake256::default();
-    shake.input(label);
-    let mut reader = shake.xof_result();
+    shake.update(label);
+    let mut reader = shake.finalize_xof();
     let mut gens: Vec<GroupElement> = Vec::new();
-    let mut uniform_bytes = [0u8; 64];
+    let mut uniform_bytes = [0u8; 32];
     for _ in 0..n {
-      reader.read_exact(&mut uniform_bytes).unwrap();
-      gens.push(GroupElement::from_uniform_bytes(&uniform_bytes));
+      loop {
+        reader.read_exact(&mut uniform_bytes).unwrap();
+        if let Some(el) = GroupElement::from_bytes(&uniform_bytes).into() {
+          gens.push(el);
+          break;
+        }
+      }
     }
 
     CommitGens { gens }
@@ -44,15 +57,15 @@ impl CommitGens {
 impl Commitment {
   pub fn compress(&self) -> CompressedCommitment {
     CompressedCommitment {
-      comm: self.comm.compress(),
+      comm: self.comm.to_bytes(),
     }
   }
 }
 
 impl CompressedCommitment {
   pub fn decompress(&self) -> Result<Commitment, NovaError> {
-    let comm = self.comm.decompress();
-    if comm.is_none() {
+    let comm = GroupElement::from_bytes(&self.comm);
+    if comm.is_none().into() {
       return Err(NovaError::DecompressionError);
     }
     Ok(Commitment {
@@ -68,9 +81,12 @@ pub trait CommitTrait {
 impl CommitTrait for [Scalar] {
   fn commit(&self, gens: &CommitGens) -> Commitment {
     assert_eq!(gens.gens.len(), self.len());
-    Commitment {
-      comm: GroupElement::vartime_multiscalar_mul(self, &gens.gens),
+    let mut comm = GroupElement::group_zero();
+    for (s, g) in self.iter().zip(gens.gens.iter()) {
+      comm += g * s;
     }
+
+    Commitment { comm }
   }
 }
 
@@ -87,7 +103,7 @@ impl ProofTranscriptTrait for Transcript {
   fn challenge_scalar(&mut self, label: &'static [u8]) -> Scalar {
     let mut buf = [0u8; 64];
     self.challenge_bytes(label, &mut buf);
-    Scalar::from_bytes_mod_order_wide(&buf)
+    Scalar::from_bytes_wide(&buf)
   }
 }
 
@@ -97,7 +113,7 @@ pub trait AppendToTranscriptTrait {
 
 impl AppendToTranscriptTrait for CompressedCommitment {
   fn append_to_transcript(&self, label: &'static [u8], transcript: &mut Transcript) {
-    transcript.append_message(label, self.comm.as_bytes());
+    transcript.append_message(label, &self.comm);
   }
 }
 
@@ -122,7 +138,7 @@ impl<'a, 'b> Mul<&'b Commitment> for &'a Scalar {
 
   fn mul(self, comm: &'b Commitment) -> Commitment {
     Commitment {
-      comm: self * comm.comm,
+      comm: comm.comm * self,
     }
   }
 }
